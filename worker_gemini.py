@@ -134,20 +134,43 @@ client = genai.Client(api_key=API_KEY)
 # ============================
 # AMBIL JOB DARI SERVER
 # ============================
-def get_next_job():
-    try:
-        r = requests.get(JOBS_API_URL, params={"action": "next"}, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-    except Exception as e:
-        print(f"[JOB] ❌ Error ambil job: {e}")
-        return None
+def get_next_job(max_retries: int = 5):
+    """
+    Ambil 1 job dari server.
+    - Return dict job     → kalau sukses
+    - Return None         → kalau server bilang 'no_job' (benar-benar habis)
+    - Return "RETRY"      → kalau error sementara (500, network, dll)
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            r = requests.get(JOBS_API_URL, params={"action": "next"}, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+        except Exception as e:
+            print(f"[JOB] ❌ Error ambil job (attempt {attempt}): {e}")
+            # Error koneksi / HTTP 500 / timeout → tunggu sebentar lalu coba lagi
+            time.sleep(5)
+            continue
 
-    if not data.get("ok"):
-        print("[JOB] ❌ Response tidak OK:", data)
-        return None
+        # Kalau server balas ok = False, lihat reason
+        if not data.get("ok"):
+            reason = data.get("reason")
+            if reason == "no_job":
+                print("[JOB] ✅ Server bilang: tidak ada job pending.")
+                return None  # benar-benar habis
+            else:
+                print("[JOB] ⚠ Response tidak OK:", data)
+                # Anggap error sementara, coba lagi
+                time.sleep(5)
+                continue
 
-    return data.get("job")
+        # Sukses ambil job
+        return data.get("job")
+
+    # Sudah coba beberapa kali tapi tetap gagal → suruh caller RETRY nanti
+    print("[JOB] ❌ Gagal ambil job setelah beberapa attempt. Tidur 60 detik lalu coba lagi.")
+    time.sleep(60)
+    return "RETRY"
 
 
 # ============================
@@ -186,10 +209,17 @@ def main():
 
     while True:
         job = get_next_job()
-        if not job:
-            print("\n🎉 Tidak ada job lagi. Worker berhenti.")
+
+        # Benar-benar tidak ada job lagi (server bilang no_job)
+        if job is None:
+            print("\n🎉 Tidak ada job lagi. Worker berhenti (no_job dari server).")
             break
 
+        # Error sementara saat ambil job → lanjut loop, coba ambil lagi
+        if job == "RETRY":
+            continue
+
+        # Di titik ini, job seharusnya dict berisi data job
         job_id = job["id"]
         judul = job["keyword"]
         print(f"\n[JOB {job_id}] 🎯 Judul: {judul} (worker {WORKER_INDEX})")
